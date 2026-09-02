@@ -84,3 +84,38 @@ If any layer blocks, the query does not prune, however well-formed the outer pre
 Only the partitioned tables named in the supplied spec matter. A query that reads no
 partitioned table trivially does not prune, and the analyser reports that as
 `prunable=False` with reason `no_partitioned_table`.
+
+## 6. Diagnostics for blocked composition
+
+When a predicate is syntactically suitable for pruning but cannot reach a configured
+partition column because a layer in section 4 blocks propagation, the analyzer must
+identify the **first semantic boundary** encountered while tracing from the outer
+predicate toward the base table.
+
+`PruningResult.reason` uses the stable form:
+
+    blocked_by:<category>@<scope>
+
+`<scope>` is the CTE name or derived-table alias whose query layer contains the
+boundary. The supported categories are:
+
+    aggregation
+    window
+    distinct
+    limit_offset
+    computed_projection
+    null_extended_join
+    set_operation_branch
+
+For a set operation, the set-operation scope is the first boundary when any branch
+cannot pass the corresponding output column through unchanged. This includes branches
+that supply a constant, a computed expression, or a different source column in that
+output position.
+
+If several layers are unsafe, report the outermost one: the first boundary reached from
+the predicate. If one query layer contains more than one blocker kind, use the first
+applicable category in the order listed above.
+
+Successful pruning keeps the existing `pruned_on:<table>.<column>` reason. Existing
+non-composition reasons such as `no_partitioned_table`, `no_filter`, and
+`no_qualifying_predicate` remain unchanged when no section-4 boundary is responsible.
