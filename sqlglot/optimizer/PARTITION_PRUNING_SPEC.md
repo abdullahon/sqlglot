@@ -67,7 +67,11 @@ A layer **blocks** the predicate when pushing it down would change the result:
 - `DISTINCT`
 - `LIMIT` or `OFFSET`
 - the null-extended side of an `LEFT`/`RIGHT`/`FULL OUTER JOIN`
-- a `UNION`/`INTERSECT`/`EXCEPT` branch that does not itself project the column
+- a `UNION`/`INTERSECT`/`EXCEPT` branch that does not itself project the column.
+  Every branch is a layer in its own right and every one of them must pass the predicate
+  through: branches are matched by position, not by name, so a branch that lists the
+  columns in a different order, substitutes a constant or a computed value, or blocks on
+  its own account defeats pruning for the whole set operation
 
 A layer also blocks it when the column is not projected as itself — for example
 `SELECT DATE_TRUNC(ts, DAY) AS ts FROM ...` shadows the real column with a computed one,
