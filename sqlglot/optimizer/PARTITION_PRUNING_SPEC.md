@@ -119,3 +119,72 @@ applicable category in the order listed above.
 Successful pruning keeps the existing `pruned_on:<table>.<column>` reason. Existing
 non-composition reasons such as `no_partitioned_table`, `no_filter`, and
 `no_qualifying_predicate` remain unchanged when no section-4 boundary is responsible.
+
+## 7. Normalized literal partition ranges
+
+For a successful pruning decision the analyzer must also expose the literal partition
+ranges that can be proved from the query. This is used by CI diagnostics to show not
+only that pruning is possible, but which part of the partition key space is selected.
+
+Add a public immutable `PartitionRange` value with these fields:
+
+    lower: str | None
+    lower_inclusive: bool
+    upper: str | None
+    upper_inclusive: bool
+
+and add `ranges: tuple[PartitionRange, ...] = ()` to `PruningResult`. Existing callers
+that construct or inspect only `prunable` and `reason` must remain compatible.
+
+Bounds are the canonical BigQuery SQL text of the literal, for example `10` or
+`'2025-03-30'`. `None` means unbounded. Ranges are ordered by lower bound and must be
+non-overlapping; overlapping ranges are merged. A point range has equal inclusive
+lower and upper bounds.
+
+Range derivation is required for bare partition-column comparisons against integer
+literals and ISO date/timestamp string literals:
+
+    col = v              -> [v, v]
+    col > v              -> (v, +inf)
+    col >= v             -> [v, +inf)
+    col < v              -> (-inf, v)
+    col <= v             -> (-inf, v]
+    col BETWEEN a AND b  -> [a, b]
+    col IN (a, b, ...)   -> one point range per distinct literal
+
+When the literal is written on the left, comparison direction is reversed before the
+range is formed. Duplicate `IN` values are removed.
+
+Boolean composition operates on the ranges after column lineage has been traced to the
+configured base partition column:
+
+- `AND` intersects the ranges from partition predicates. Conjuncts on unrelated
+  columns do not widen or erase a known partition range.
+- `OR` unions branch ranges only when every branch yields a range for the same
+  configured partition column. Otherwise the expression yields no provable range.
+- `NOT` complements the normalized range set, applying De Morgan's law through nested
+  boolean expressions.
+
+If an `AND` intersection is empty, the query is still `prunable=True` and `ranges=()`:
+the predicate is unsatisfiable and therefore reads no partitions.
+
+Safe wrappers from section 2, `IS NULL`, dynamic constants such as `CURRENT_DATE()`,
+and literal forms other than the required integer / ISO string forms keep their
+existing pruning verdict but do not have to produce ranges.
+
+For blocked composition, `prunable=False`, the section-6 blocker reason is returned,
+and `ranges` must be empty. For a successful literal predicate through aliases, CTEs,
+derived tables, joins, or set operations, the ranges describe the configured base
+partition column rather than the outer alias.
+
+The analyzer must keep normalized range analysis bounded. A result may contain at most
+32 disjoint ranges. Canonicalize and merge ranges before applying this limit. If the
+exact normalized result would still contain more than 32 disjoint ranges, preserve the
+existing pruning verdict and reason but return `ranges=()` rather than expanding or
+truncating the range set. Do not reject a query merely because exact range diagnostics
+exceed the cap.
+
+The cap applies to the final normalized result, not to intermediate syntax. For example,
+many overlapping OR branches that merge to one interval produce that interval, and an
+IN list larger than the cap may still produce ranges when later AND predicates reduce
+the exact normalized result to 32 or fewer disjoint ranges.
